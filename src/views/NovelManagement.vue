@@ -15,6 +15,10 @@
           <el-icon><Download /></el-icon>
           导出列表
         </el-button>
+        <el-button @click="openImportDialog">
+          <el-icon><Upload /></el-icon>
+          导入小说
+        </el-button>
         <el-button type="primary" @click="showCreateDialog = true">
           <el-icon><Plus /></el-icon>
           创建新小说
@@ -295,6 +299,112 @@
       </template>
     </el-dialog>
 
+    <!-- 导入小说对话框 -->
+    <el-dialog
+      v-model="showImportDialog"
+      title="导入小说"
+      width="560px"
+      :close-on-click-modal="false"
+      @close="closeImportDialog"
+    >
+      <div class="import-dialog-body">
+        <!-- 上传 -->
+        <div class="import-section">
+          <div class="section-label">上传文件</div>
+          <el-upload
+            ref="importUploadRef"
+            :auto-upload="false"
+            :limit="1"
+            accept=".txt,.docx"
+            :on-change="onImportFileChange"
+            :on-exceed="onImportFileExceed"
+            :file-list="importFileList"
+          >
+            <template #trigger>
+              <el-button type="primary" plain>选择 TXT / DOCX 文件</el-button>
+            </template>
+            <template #tip>
+              <div class="el-upload__tip">支持 .txt、.docx，TXT 可选编码</div>
+            </template>
+          </el-upload>
+          <div v-if="uploadedFile" class="encoding-row">
+            <span class="encoding-label">编码：</span>
+            <el-radio-group v-model="selectedEncoding" size="small">
+              <el-radio-button value="utf-8">UTF-8</el-radio-button>
+              <el-radio-button value="gbk">GBK</el-radio-button>
+            </el-radio-group>
+            <el-button size="small" type="primary" link @click="rereadWithEncoding">重新读取</el-button>
+          </div>
+        </div>
+
+        <!-- 章节方式（有内容时显示） -->
+        <div v-if="bookContent" class="import-section">
+          <div class="section-label">章节处理</div>
+          <el-radio-group v-model="chapterMode" size="small">
+            <el-radio-button value="regex">自动检测章节（第N章 / Chapter N）</el-radio-button>
+            <el-radio-button value="single">整本为一章</el-radio-button>
+          </el-radio-group>
+        </div>
+
+        <!-- 解析预览（有内容时显示） -->
+        <div v-if="bookContent" class="import-section preview-section">
+          <div class="section-label">解析结果</div>
+          <div class="preview-stats">
+            <span>共 {{ totalWordCount }} 字</span>
+            <span>共 {{ parsedChapters.length }} 章</span>
+          </div>
+          <div v-if="parsedChapters.length > 0 && parsedChapters.length <= 50" class="chapter-preview">
+            <div
+              v-for="(ch, i) in parsedChapters"
+              :key="i"
+              class="chapter-preview-item"
+            >
+              {{ i + 1 }}. {{ ch.title }}（{{ ch.wordCount }}字）
+            </div>
+          </div>
+          <div v-else-if="parsedChapters.length > 50" class="chapter-preview">
+            <div
+              v-for="(ch, i) in parsedChapters.slice(0, 20)"
+              :key="i"
+              class="chapter-preview-item"
+            >
+              {{ i + 1 }}. {{ ch.title }}（{{ ch.wordCount }}字）
+            </div>
+            <div class="chapter-preview-more">… 共 {{ parsedChapters.length }} 章</div>
+          </div>
+        </div>
+
+        <!-- 小说信息 -->
+        <div class="import-section">
+          <div class="section-label">小说信息</div>
+          <el-form ref="importFormRef" :model="importForm" :rules="importFormRules" label-width="80px">
+            <el-form-item label="标题" prop="title">
+              <el-input v-model="importForm.title" placeholder="默认使用文件名" />
+            </el-form-item>
+            <el-form-item label="类型" prop="genre">
+              <el-select v-model="importForm.genre" placeholder="请选择类型" style="width: 100%">
+                <el-option
+                  v-for="(preset, key) in genrePresets"
+                  :key="key"
+                  :label="preset.name"
+                  :value="key"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="简介">
+              <el-input v-model="importForm.description" type="textarea" :rows="2" placeholder="选填" />
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="showImportDialog = false">取消</el-button>
+        <el-button type="primary" :disabled="!bookContent" @click="confirmImport">
+          导入并进入写作
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 小说详情对话框 -->
     <el-dialog 
       v-model="showDetailsDialog" 
@@ -544,12 +654,26 @@ import { ref, computed, onMounted, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { 
   Plus, Search, Document, EditPen, Calendar, Edit, View, 
-  MoreFilled, Star, Download, CopyDocument, Delete, Close
+  MoreFilled, Star, Download, CopyDocument, Delete, Close, Upload
 } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import apiService from '@/services/api.js'
+import { useFileImport } from '@/composables/useFileImport.js'
 
 const router = useRouter()
+
+// 导入小说 composable
+const {
+  bookContent,
+  uploadedFile,
+  selectedEncoding,
+  chapterMode,
+  totalWordCount,
+  parsedChapters,
+  readFile,
+  buildChapterList,
+  reset: resetFileImport
+} = useFileImport()
 
 // 响应式数据
 const statusFilter = ref('all')
@@ -570,6 +694,20 @@ const editFileInput = ref()
 const isGeneratingDescription = ref(false)
 const isGeneratingEditDescription = ref(false)
 const isSavingEdit = ref(false)
+
+// 导入小说弹窗
+const showImportDialog = ref(false)
+const importFileList = ref([])
+const importUploadRef = ref()
+const importFormRef = ref()
+const importForm = ref({
+  title: '',
+  genre: '',
+  description: ''
+})
+const importFormRules = {
+  genre: [{ required: true, message: '请选择小说类型', trigger: 'change' }]
+}
 
 // 小说数据 - 从localStorage加载
 const novels = ref([])
@@ -1263,6 +1401,97 @@ const resetCreateForm = () => {
     tags: []
   }
   tagInput.value = ''
+}
+
+// 导入小说
+const openImportDialog = () => {
+  showImportDialog.value = true
+  importForm.value = { title: '', genre: '', description: '' }
+  importFileList.value = []
+}
+
+const closeImportDialog = () => {
+  resetFileImport()
+  showImportDialog.value = false
+  importFileList.value = []
+  importForm.value = { title: '', genre: '', description: '' }
+}
+
+const onImportFileChange = async (uploadFile) => {
+  const file = uploadFile?.raw || uploadFile
+  if (!file) return
+  uploadedFile.value = { raw: file, name: file.name }
+  importFileList.value = [uploadFile]
+  try {
+    await readFile(file)
+    if (!importForm.value.title) {
+      const name = file.name.replace(/\.[^.]+$/, '')
+      importForm.value.title = name || '导入的小说'
+    }
+    ElMessage.success('文件读取成功')
+  } catch (err) {
+    ElMessage.error(err.message || '文件读取失败')
+    importFileList.value = []
+  }
+}
+
+const onImportFileExceed = () => {
+  ElMessage.warning('仅支持一个文件，请先移除当前文件后再选')
+}
+
+const rereadWithEncoding = async () => {
+  if (!uploadedFile.value?.raw) return
+  try {
+    await readFile(uploadedFile.value.raw, selectedEncoding.value)
+    ElMessage.success('已按当前编码重新读取')
+  } catch (err) {
+    ElMessage.error(err.message || '重新读取失败')
+  }
+}
+
+const confirmImport = async () => {
+  if (!bookContent.value) {
+    ElMessage.warning('请先上传并解析文件')
+    return
+  }
+  try {
+    await importFormRef.value?.validate()
+  } catch {
+    return
+  }
+  const genre = importForm.value.genre
+  const genrePrompt = genrePresets.value[genre]?.prompt || ''
+  const chapterList = buildChapterList()
+  const totalWords = chapterList.reduce((sum, ch) => sum + (ch.wordCount || 0), 0)
+  const newNovel = {
+    id: Date.now(),
+    title: importForm.value.title?.trim() || '导入的小说',
+    genre,
+    description: importForm.value.description?.trim() || '',
+    cover: '',
+    status: 'writing',
+    chapters: chapterList.length,
+    wordCount: totalWords,
+    totalWords,
+    avgWordsPerChapter: chapterList.length ? Math.round(totalWords / chapterList.length) : 0,
+    writingDays: 0,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    chapterList,
+    writingRecords: [],
+    genrePrompt,
+    characters: [],
+    worldSettings: [],
+    corpusData: [],
+    events: []
+  }
+  novels.value.unshift(newNovel)
+  updateGenreUsageCount(genre)
+  saveNovels()
+  ElMessage.success('导入成功，正在跳转到写作台…')
+  showImportDialog.value = false
+  closeImportDialog()
+  router.push(`/writer?novelId=${newNovel.id}`)
 }
 
 // 编辑小说信息
@@ -1997,6 +2226,57 @@ onMounted(() => {
 .image-placeholder i {
   font-size: 24px;
   margin-bottom: 8px;
+}
+
+/* 导入小说弹窗 */
+.import-dialog-body {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.import-section {
+  margin-bottom: 18px;
+}
+.import-section .section-label {
+  font-weight: 500;
+  color: #303133;
+  margin-bottom: 8px;
+  display: block;
+}
+.encoding-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.encoding-label {
+  font-size: 13px;
+  color: #606266;
+}
+.preview-section .preview-stats {
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #606266;
+}
+.preview-section .preview-stats span {
+  margin-right: 16px;
+}
+.chapter-preview {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  padding: 8px;
+  background: #fafafa;
+}
+.chapter-preview-item {
+  font-size: 13px;
+  padding: 4px 0;
+  color: #606266;
+}
+.chapter-preview-more {
+  font-size: 12px;
+  color: #909399;
+  padding: 4px 0;
 }
 
 /* 响应式设计 */
